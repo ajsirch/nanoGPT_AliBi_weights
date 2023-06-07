@@ -15,6 +15,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+import numpy as np
+
 # @torch.jit.script # good to enable when not using torch.compile, disable when using (our default)
 def new_gelu(x):
     """
@@ -49,6 +51,8 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
+        self.m_factor = 1/2**torch.range(0, self.n_head, 1) #define alibi m_factor
+
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
@@ -72,7 +76,7 @@ class CausalSelfAttention(nn.Module):
             y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
             # manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)) + self.m_factor * self.get_alibi_matrix(x))
             att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
             att = F.softmax(att, dim=-1)
             att = self.attn_dropout(att)
@@ -82,6 +86,13 @@ class CausalSelfAttention(nn.Module):
         # output projection
         y = self.resid_dropout(self.c_proj(y))
         return y
+    
+    def get_alibi_matrix(self):
+        a = np.arange(1, self.n_head)
+        b = np.tile(a, (self.n_head-1,1))
+        for idx in range(b.shape[0]):
+            b[idx] = b[idx] - (idx + 1)
+        return torch.from_numpy(np.tril(b))
 
 class MLP(nn.Module):
 
